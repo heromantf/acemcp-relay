@@ -40,24 +40,24 @@ var ssePaths = []string{
 
 // ChatStreamRequest 用于验证 /chat-stream 请求
 type ChatStreamRequest struct {
-	Model               string        `json:"model"`
-	Path                *string       `json:"path"`
-	Prefix              *string       `json:"prefix"`
-	SelectedCode        *string       `json:"selected_code"`
-	Suffix              *string       `json:"suffix"`
-	Message             string        `json:"message"`
-	ChatHistory         []interface{} `json:"chat_history"`
-	Lang                *string       `json:"lang"`
-	UserGuidelines      string        `json:"user_guidelines"`
-	WorkspaceGuidelines string        `json:"workspace_guidelines"`
-	ThirdPartyOverride  *string       `json:"third_party_override"`
-	ToolDefinitions     []interface{} `json:"tool_definitions"`
-	Nodes               []interface{} `json:"nodes"`
-	Mode                string        `json:"mode"`
-	AgentMemories       string        `json:"agent_memories"`
-	PersonaType         *string       `json:"persona_type"`
-	SystemPrompt        *string       `json:"system_prompt"`
-	Rules               []interface{} `json:"rules"`
+	Model                        string        `json:"model"`
+	Path                         *string       `json:"path"`
+	Prefix                       *string       `json:"prefix"`
+	SelectedCode                 *string       `json:"selected_code"`
+	Suffix                       *string       `json:"suffix"`
+	Message                      string        `json:"message"`
+	ChatHistory                  []interface{} `json:"chat_history"`
+	Lang                         *string       `json:"lang"`
+	ContextCodeExchangeRequestID *string       `json:"context_code_exchange_request_id"`
+	UserGuidelines               string        `json:"user_guidelines"`
+	WorkspaceGuidelines          string        `json:"workspace_guidelines"`
+	ThirdPartyOverride           *string       `json:"third_party_override"`
+	ToolDefinitions              []interface{} `json:"tool_definitions"`
+	Nodes                        []interface{} `json:"nodes"`
+	Mode                         string        `json:"mode"`
+	AgentMemories                string        `json:"agent_memories"`
+	PersonaType                  *string       `json:"persona_type"`
+	SystemPrompt                 *string       `json:"system_prompt"`
 }
 
 const PROMPT_ENHANCER_MESSAGE_PREFIX = "⚠️ NO TOOLS ALLOWED ⚠️\n\nHere is an instruction that I'd like to give you, but it needs to be improved. Rewrite and enhance this instruction to make it clearer, more specific, less ambiguous, and correct any mistakes. Do not use any tools: reply immediately with your answer, even if you're not sure. Consider the context of our conversation history when enhancing the prompt. If there is code in triple backticks (```) consider whether it is a code sample and should remain unchanged.Reply with the following format:\n\n### BEGIN RESPONSE ###\nHere is an enhanced version of the original instruction that is more specific and clear:\n<augment-enhanced-prompt>enhanced prompt goes here</augment-enhanced-prompt>\n\n### END RESPONSE ###\n\nHere is my original instruction:\n\n"
@@ -164,6 +164,9 @@ func validateChatStreamRequest(body []byte) error {
 	if req.Lang != nil {
 		return fmt.Errorf("lang must be null")
 	}
+	if req.ContextCodeExchangeRequestID != nil {
+		return fmt.Errorf("context_code_exchange_request_id must be null")
+	}
 	if req.PersonaType != nil {
 		return fmt.Errorf("persona_type must be null")
 	}
@@ -185,9 +188,6 @@ func validateChatStreamRequest(body []byte) error {
 	}
 	if len(req.Nodes) > 0 {
 		return fmt.Errorf("nodes must be empty")
-	}
-	if len(req.Rules) > 0 {
-		return fmt.Errorf("rules must be empty")
 	}
 	if len(req.ChatHistory) > 0 {
 		return fmt.Errorf("chat_history must be empty")
