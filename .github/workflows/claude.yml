@@ -30,6 +30,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: 'go.mod'
+
       - name: Generate GitHub App token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -42,7 +47,11 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: "--model claude-opus-4-5-20251101"
           github_token: ${{ steps.app-token.outputs.token }}
+          bot_id: "249931802"
+          bot_name: "claude-code-hm[bot]"
+          claude_args: |
+            --model claude-opus-4-5-20251101
+            --allowedTools "Bash(go:*),WebSearch,WebFetch"
         env:
           ANTHROPIC_BASE_URL: ${{ secrets.ANTHROPIC_BASE_URL }}
