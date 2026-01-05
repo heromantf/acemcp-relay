@@ -46,6 +46,12 @@ const (
 	// 请求状态
 	StatusPending   = "pending"
 	StatusCompleted = "completed"
+
+	// Leaderboard 配置
+	LeaderboardUpdateInterval = 30 * time.Minute
+	LeaderboardPath           = "/agents/codebase-retrieval"
+	LeaderboardTopN           = 10
+	LeaderboardTimezone       = "Asia/Shanghai"
 )
 
 var allowedPaths = []string{
@@ -263,6 +269,27 @@ func initDB() error {
 	`)
 	if err != nil {
 		return fmt.Errorf("failed to migrate request_logs table: %w", err)
+	}
+
+	// 自动迁移：创建 leaderboard 表
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS leaderboard (
+			id VARCHAR(32) PRIMARY KEY,
+			date_str VARCHAR(10) NOT NULL,
+			rank INTEGER NOT NULL,
+			user_id VARCHAR(255) NOT NULL,
+			request_count BIGINT NOT NULL,
+			updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_leaderboard_date ON leaderboard(date_str);
+
+		-- 部分索引：加速 codebase-retrieval 统计查询
+		CREATE INDEX IF NOT EXISTS idx_request_logs_codebase_retrieval
+			ON request_logs(user_id, request_timestamp)
+			WHERE request_path = '/agents/codebase-retrieval';
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to migrate leaderboard table: %w", err)
 	}
 
 	return nil
@@ -628,6 +655,108 @@ func sseProxyHandler(c *gin.Context) {
 	}
 }
 
+// updateLeaderboard 统计当天 codebase-retrieval 请求并更新排行榜
+func updateLeaderboard() error {
+	// 加载 Asia/Shanghai 时区
+	loc, err := time.LoadLocation(LeaderboardTimezone)
+	if err != nil {
+		return fmt.Errorf("failed to load timezone: %w", err)
+	}
+
+	// 获取当天日期范围（Asia/Shanghai）
+	now := time.Now().In(loc)
+	dateStr := now.Format("2006-01-02")
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	dayEnd := dayStart.Add(24 * time.Hour)
+
+	log.Printf("[LEADERBOARD] Updating leaderboard for %s", dateStr)
+
+	// 查询当天 top N 用户（只统计 status_code=200 的成功请求）
+	rows, err := db.Query(`
+		SELECT user_id, COUNT(*) as cnt
+		FROM request_logs
+		WHERE request_path = $1
+		  AND request_timestamp >= $2
+		  AND request_timestamp < $3
+		  AND status_code = 200
+		GROUP BY user_id
+		ORDER BY cnt DESC
+		LIMIT $4
+	`, LeaderboardPath, dayStart, dayEnd, LeaderboardTopN)
+	if err != nil {
+		return fmt.Errorf("failed to query leaderboard data: %w", err)
+	}
+	defer rows.Close()
+
+	// 收集结果
+	type userCount struct {
+		userID string
+		count  int64
+	}
+	var results []userCount
+	for rows.Next() {
+		var uc userCount
+		if err := rows.Scan(&uc.userID, &uc.count); err != nil {
+			return fmt.Errorf("failed to scan row: %w", err)
+		}
+		results = append(results, uc)
+	}
+
+	if len(results) == 0 {
+		log.Printf("[LEADERBOARD] No data for %s", dateStr)
+		return nil
+	}
+
+	// 开始事务
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	// UPSERT 每条记录
+	datePrefix := now.Format("20060102")
+	for rank, uc := range results {
+		id := fmt.Sprintf("%s_%02d", datePrefix, rank+1)
+		_, err := tx.Exec(`
+			INSERT INTO leaderboard (id, date_str, rank, user_id, request_count, updated_at)
+			VALUES ($1, $2, $3, $4, $5, NOW())
+			ON CONFLICT (id) DO UPDATE SET
+				user_id = EXCLUDED.user_id,
+				request_count = EXCLUDED.request_count,
+				updated_at = NOW()
+		`, id, dateStr, rank+1, uc.userID, uc.count)
+		if err != nil {
+			return fmt.Errorf("failed to upsert leaderboard: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
+	log.Printf("[LEADERBOARD] Updated %d entries for %s", len(results), dateStr)
+	return nil
+}
+
+// startLeaderboardScheduler 启动排行榜定时更新任务
+func startLeaderboardScheduler(ctx context.Context) {
+	ticker := time.NewTicker(LeaderboardUpdateInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("[LEADERBOARD] Scheduler stopped")
+			return
+		case <-ticker.C:
+			if err := updateLeaderboard(); err != nil {
+				log.Printf("[LEADERBOARD] Update failed: %v", err)
+			}
+		}
+	}
+}
+
 func main() {
 	// 加载配置
 	loadConfig()
@@ -646,6 +775,17 @@ func main() {
 		log.Fatalf("无法连接数据库: %v", err)
 	}
 	defer db.Close()
+
+	// 启动时执行一次 leaderboard 统计
+	log.Println("[LEADERBOARD] Running initial statistics...")
+	if err := updateLeaderboard(); err != nil {
+		log.Printf("[LEADERBOARD] Initial update failed: %v", err)
+	}
+
+	// 启动 leaderboard 定时任务
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go startLeaderboardScheduler(ctx)
 
 	r := gin.Default()
 
