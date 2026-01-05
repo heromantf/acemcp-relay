@@ -67,28 +67,14 @@ var allowedPaths = []string{
 
 var ssePaths = []string{
 	"/chat-stream",
+	"/prompt-enhancer",
 }
 
 // ChatStreamRequest 用于验证 /chat-stream 请求
 type ChatStreamRequest struct {
-	Model                        string        `json:"model"`
-	Path                         *string       `json:"path"`
-	Prefix                       *string       `json:"prefix"`
-	SelectedCode                 *string       `json:"selected_code"`
-	Suffix                       *string       `json:"suffix"`
-	Message                      string        `json:"message"`
-	ChatHistory                  []interface{} `json:"chat_history"`
-	Lang                         *string       `json:"lang"`
-	ContextCodeExchangeRequestID *string       `json:"context_code_exchange_request_id"`
-	UserGuidelines               string        `json:"user_guidelines"`
-	WorkspaceGuidelines          string        `json:"workspace_guidelines"`
-	ThirdPartyOverride           *string       `json:"third_party_override"`
-	ToolDefinitions              []interface{} `json:"tool_definitions"`
-	Nodes                        []interface{} `json:"nodes"`
-	Mode                         string        `json:"mode"`
-	AgentMemories                string        `json:"agent_memories"`
-	PersonaType                  *string       `json:"persona_type"`
-	SystemPrompt                 *string       `json:"system_prompt"`
+	Message      string  `json:"message"`
+	Mode         string  `json:"mode"`
+	SystemPrompt *string `json:"system_prompt"`
 }
 
 const PROMPT_ENHANCER_MESSAGE_PREFIX = "⚠️ NO TOOLS ALLOWED ⚠️\n\nHere is an instruction that I'd like to give you, but it needs to be improved. Rewrite and enhance this instruction to make it clearer, more specific, less ambiguous, and correct any mistakes. Do not use any tools: reply immediately with your answer, even if you're not sure. Consider the context of our conversation history when enhancing the prompt. If there is code in triple backticks (```) consider whether it is a code sample and should remain unchanged.Reply with the following format:\n\n### BEGIN RESPONSE ###\nHere is an enhanced version of the original instruction that is more specific and clear:\n<augment-enhanced-prompt>enhanced prompt goes here</augment-enhanced-prompt>\n\n### END RESPONSE ###\n\nHere is my original instruction:\n\n"
@@ -404,66 +390,17 @@ func validateChatStreamRequest(body []byte) error {
 		return fmt.Errorf("invalid JSON")
 	}
 
-	// 检查必须为空字符串的字段
-	if req.Model != "" {
-		return fmt.Errorf("model must be empty")
-	}
-	if req.AgentMemories != "" {
-		return fmt.Errorf("agent_memories must be empty")
-	}
-	if req.UserGuidelines != "" {
-		return fmt.Errorf("user_guidelines must be empty")
-	}
-	if req.WorkspaceGuidelines != "" {
-		return fmt.Errorf("workspace_guidelines must be empty")
-	}
-
-	// 检查必须为 null 的字段
-	if req.Path != nil {
-		return fmt.Errorf("path must be null")
-	}
-	if req.Prefix != nil {
-		return fmt.Errorf("prefix must be null")
-	}
-	if req.SelectedCode != nil {
-		return fmt.Errorf("selected_code must be null")
-	}
-	if req.Suffix != nil {
-		return fmt.Errorf("suffix must be null")
-	}
-	if req.Lang != nil {
-		return fmt.Errorf("lang must be null")
-	}
-	if req.ContextCodeExchangeRequestID != nil {
-		return fmt.Errorf("context_code_exchange_request_id must be null")
-	}
-	if req.PersonaType != nil {
-		return fmt.Errorf("persona_type must be null")
-	}
-	if req.SystemPrompt != nil {
-		return fmt.Errorf("system_prompt must be null")
-	}
-	if req.ThirdPartyOverride != nil {
-		return fmt.Errorf("third_party_override must be null")
-	}
-
 	// 检查 mode 必须为 CHAT
 	if req.Mode != "CHAT" {
 		return fmt.Errorf("mode must be CHAT")
 	}
 
-	// 检查必须为空数组的字段
-	if len(req.ToolDefinitions) > 0 {
-		return fmt.Errorf("tool_definitions must be empty")
-	}
-	if len(req.Nodes) > 0 {
-		return fmt.Errorf("nodes must be empty")
-	}
-	if len(req.ChatHistory) > 0 {
-		return fmt.Errorf("chat_history must be empty")
+	// 检查 system_prompt 必须为 null
+	if req.SystemPrompt != nil {
+		return fmt.Errorf("system_prompt must be null")
 	}
 
-	// 检查 message 必须以固定 prompt 开头
+	// 检查 message 必须以固定 prompt 开头（prompt-enhancer 功能）
 	if !strings.HasPrefix(req.Message, PROMPT_ENHANCER_MESSAGE_PREFIX) {
 		return fmt.Errorf("message must start with required prompt")
 	}
