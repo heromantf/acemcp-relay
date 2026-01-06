@@ -115,9 +115,9 @@ var skipResponseHeaders = map[string]bool{
 
 // generateRandomHex 生成指定长度的随机十六进制字符串
 func generateRandomHex(length int) string {
-	bytes := make([]byte, length/2)
-	rand.Read(bytes)
-	return hex.EncodeToString(bytes)
+	randBytes := make([]byte, length/2)
+	rand.Read(randBytes)
+	return hex.EncodeToString(randBytes)
 }
 
 // 常用邮箱后缀
@@ -278,6 +278,20 @@ func initDB() error {
 		return fmt.Errorf("failed to migrate leaderboard table: %w", err)
 	}
 
+	// 自动迁移：创建 error_details 表
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS error_details (
+			id SERIAL PRIMARY KEY,
+			request_id UUID NOT NULL REFERENCES request_logs(id),
+			error TEXT NOT NULL,
+			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
+		);
+		CREATE INDEX IF NOT EXISTS idx_error_details_request_id ON error_details(request_id);
+	`)
+	if err != nil {
+		return fmt.Errorf("failed to migrate error_details table: %w", err)
+	}
+
 	return nil
 }
 
@@ -361,6 +375,22 @@ func completeRequestLogAsync(entry RequestLogEntry) {
 
 		if err != nil {
 			log.Printf("[ERROR] Failed to update request log: %v", err)
+		}
+	}()
+}
+
+// saveErrorDetailsAsync 异步保存错误详情到数据库
+func saveErrorDetailsAsync(logID string, errorMsg string) {
+	if logID == "" || errorMsg == "" {
+		return
+	}
+	go func() {
+		_, err := db.Exec(`
+			INSERT INTO error_details (request_id, error)
+			VALUES ($1, $2)
+		`, logID, errorMsg)
+		if err != nil {
+			log.Printf("[ERROR] Failed to save error details: %v", err)
 		}
 	}()
 }
@@ -450,7 +480,9 @@ func proxyHandler(c *gin.Context) {
 			completeRequestLogAsync(getRequestLogEntry(c, 499))
 			return
 		}
-		log.Printf("[502 ERROR] path=%s, error=%v, headers=%v, body=%s", c.Request.URL.Path, err, c.Request.Header, string(body))
+		logID, _ := c.Get(ContextKeyLogID)
+		logIDStr, _ := logID.(string)
+		saveErrorDetailsAsync(logIDStr, err.Error())
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "failed to forward request"})
 		completeRequestLogAsync(getRequestLogEntry(c, http.StatusBadGateway))
 		return
@@ -474,7 +506,9 @@ func proxyHandler(c *gin.Context) {
 	}
 
 	if resp.StatusCode >= 400 {
-		log.Printf("[%d FROM UPSTREAM] path=%s, headers=%v, reqBody=%s, respBody=%s", resp.StatusCode, c.Request.URL.Path, c.Request.Header, string(body), string(respBody))
+		logID, _ := c.Get(ContextKeyLogID)
+		logIDStr, _ := logID.(string)
+		saveErrorDetailsAsync(logIDStr, string(respBody))
 	}
 
 	// 对 /get-models 成功响应进行隐私处理
@@ -496,8 +530,10 @@ func sseProxyHandler(c *gin.Context) {
 
 	// 验证 /chat-stream 请求内容
 	if c.FullPath() == "/chat-stream" {
-		if err := validateChatStreamRequest(body); err != nil {
-			log.Printf("[403 FORBIDDEN] path=%s, reason=%s, body=%s", c.Request.URL.Path, err.Error(), string(body))
+		if err = validateChatStreamRequest(body); err != nil {
+			logID, _ := c.Get(ContextKeyLogID)
+			logIDStr, _ := logID.(string)
+			saveErrorDetailsAsync(logIDStr, err.Error())
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "request validation failed"})
 			completeRequestLogAsync(getRequestLogEntry(c, http.StatusForbidden))
 			return
@@ -531,7 +567,9 @@ func sseProxyHandler(c *gin.Context) {
 			completeRequestLogAsync(getRequestLogEntry(c, 499))
 			return
 		}
-		log.Printf("[502 ERROR] path=%s, error=%v, headers=%v, body=%s", c.Request.URL.Path, err, c.Request.Header, string(body))
+		logID, _ := c.Get(ContextKeyLogID)
+		logIDStr, _ := logID.(string)
+		saveErrorDetailsAsync(logIDStr, err.Error())
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "failed to forward request: " + err.Error()})
 		completeRequestLogAsync(getRequestLogEntry(c, http.StatusBadGateway))
 		return
@@ -541,7 +579,9 @@ func sseProxyHandler(c *gin.Context) {
 	// 上游返回错误状态码时，直接转发错误响应（非流式）
 	if resp.StatusCode >= 400 {
 		respBody, _ := io.ReadAll(resp.Body)
-		log.Printf("[%d FROM UPSTREAM] path=%s, headers=%v, reqBody=%s, respBody=%s", resp.StatusCode, c.Request.URL.Path, c.Request.Header, string(body), string(respBody))
+		logID, _ := c.Get(ContextKeyLogID)
+		logIDStr, _ := logID.(string)
+		saveErrorDetailsAsync(logIDStr, string(respBody))
 		c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
 		completeRequestLogAsync(getRequestLogEntry(c, resp.StatusCode))
 		return
