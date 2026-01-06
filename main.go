@@ -283,6 +283,7 @@ func initDB() error {
 		CREATE TABLE IF NOT EXISTS error_details (
 			id SERIAL PRIMARY KEY,
 			request_id UUID NOT NULL REFERENCES request_logs(id),
+			source VARCHAR(20) NOT NULL DEFAULT 'proxy',
 			error TEXT NOT NULL,
 			created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 		);
@@ -380,15 +381,16 @@ func completeRequestLogAsync(entry RequestLogEntry) {
 }
 
 // saveErrorDetailsAsync 异步保存错误详情到数据库
-func saveErrorDetailsAsync(logID string, errorMsg string) {
+// source: "proxy" 表示本地转发服务错误，"upstream" 表示上游服务错误
+func saveErrorDetailsAsync(logID string, source string, errorMsg string) {
 	if logID == "" || errorMsg == "" {
 		return
 	}
 	go func() {
 		_, err := db.Exec(`
-			INSERT INTO error_details (request_id, error)
-			VALUES ($1, $2)
-		`, logID, errorMsg)
+			INSERT INTO error_details (request_id, source, error)
+			VALUES ($1, $2, $3)
+		`, logID, source, errorMsg)
 		if err != nil {
 			log.Printf("[ERROR] Failed to save error details: %v", err)
 		}
@@ -476,13 +478,12 @@ func proxyHandler(c *gin.Context) {
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
-			log.Printf("[INFO] Client disconnected, upstream canceled: path=%s", c.Request.URL.Path)
 			completeRequestLogAsync(getRequestLogEntry(c, 499))
 			return
 		}
 		logID, _ := c.Get(ContextKeyLogID)
 		logIDStr, _ := logID.(string)
-		saveErrorDetailsAsync(logIDStr, err.Error())
+		saveErrorDetailsAsync(logIDStr, "proxy", err.Error())
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "failed to forward request"})
 		completeRequestLogAsync(getRequestLogEntry(c, http.StatusBadGateway))
 		return
@@ -508,7 +509,7 @@ func proxyHandler(c *gin.Context) {
 	if resp.StatusCode >= 400 {
 		logID, _ := c.Get(ContextKeyLogID)
 		logIDStr, _ := logID.(string)
-		saveErrorDetailsAsync(logIDStr, string(respBody))
+		saveErrorDetailsAsync(logIDStr, "upstream", string(respBody))
 	}
 
 	// 对 /get-models 成功响应进行隐私处理
@@ -533,7 +534,7 @@ func sseProxyHandler(c *gin.Context) {
 		if err = validateChatStreamRequest(body); err != nil {
 			logID, _ := c.Get(ContextKeyLogID)
 			logIDStr, _ := logID.(string)
-			saveErrorDetailsAsync(logIDStr, err.Error())
+			saveErrorDetailsAsync(logIDStr, "proxy", err.Error())
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "request validation failed"})
 			completeRequestLogAsync(getRequestLogEntry(c, http.StatusForbidden))
 			return
@@ -563,13 +564,12 @@ func sseProxyHandler(c *gin.Context) {
 	resp, err := sseHttpClient.Do(req)
 	if err != nil {
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
-			log.Printf("[INFO] Client disconnected, upstream canceled: path=%s", c.Request.URL.Path)
 			completeRequestLogAsync(getRequestLogEntry(c, 499))
 			return
 		}
 		logID, _ := c.Get(ContextKeyLogID)
 		logIDStr, _ := logID.(string)
-		saveErrorDetailsAsync(logIDStr, err.Error())
+		saveErrorDetailsAsync(logIDStr, "proxy", err.Error())
 		c.AbortWithStatusJSON(http.StatusBadGateway, gin.H{"error": "failed to forward request: " + err.Error()})
 		completeRequestLogAsync(getRequestLogEntry(c, http.StatusBadGateway))
 		return
@@ -581,7 +581,7 @@ func sseProxyHandler(c *gin.Context) {
 		respBody, _ := io.ReadAll(resp.Body)
 		logID, _ := c.Get(ContextKeyLogID)
 		logIDStr, _ := logID.(string)
-		saveErrorDetailsAsync(logIDStr, string(respBody))
+		saveErrorDetailsAsync(logIDStr, "upstream", string(respBody))
 		c.Data(resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
 		completeRequestLogAsync(getRequestLogEntry(c, resp.StatusCode))
 		return
