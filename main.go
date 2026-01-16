@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 )
 
 // 从环境变量加载的配置
@@ -35,6 +36,8 @@ var (
 	dbUser          string
 	dbPassword      string
 	dbName          string
+	redisPort       int
+	apiKeyCacheTTL  time.Duration
 )
 
 const (
@@ -190,6 +193,9 @@ var sseHttpClient = &http.Client{
 // 全局数据库连接
 var db *sql.DB
 
+// 全局 Redis 客户端
+var redisClient *redis.Client
+
 // loadConfig 从 .env 文件加载配置
 func loadConfig() {
 	_ = godotenv.Load() // 忽略错误，允许使用环境变量
@@ -202,6 +208,8 @@ func loadConfig() {
 	dbUser = getEnv("DB_USER", "postgres")
 	dbPassword = getEnv("DB_PASSWORD", "")
 	dbName = getEnv("DB_NAME", "postgres")
+	redisPort = getEnvInt("REDIS_PORT", 6379)
+	apiKeyCacheTTL = getEnvDuration("API_KEY_CACHE_TTL", 30*time.Minute)
 }
 
 func getEnv(key, defaultValue string) string {
@@ -215,6 +223,15 @@ func getEnvInt(key string, defaultValue int) int {
 	if value := os.Getenv(key); value != "" {
 		if intVal, err := strconv.Atoi(value); err == nil {
 			return intVal
+		}
+	}
+	return defaultValue
+}
+
+func getEnvDuration(key string, defaultValue time.Duration) time.Duration {
+	if value := os.Getenv(key); value != "" {
+		if duration, err := time.ParseDuration(value); err == nil {
+			return duration
 		}
 	}
 	return defaultValue
@@ -296,6 +313,19 @@ func initDB() error {
 	return nil
 }
 
+// initRedis 初始化 Redis 连接
+func initRedis() error {
+	redisClient = redis.NewClient(&redis.Options{
+		Addr: fmt.Sprintf("localhost:%d", redisPort),
+		DB:   0,
+	})
+	_, err := redisClient.Ping(context.Background()).Result()
+	if err != nil {
+		return fmt.Errorf("failed to connect to Redis: %w", err)
+	}
+	return nil
+}
+
 // authenticateRequest 验证请求的 Authorization header，返回 user_id
 // 如果验证失败返回空字符串和 false
 func authenticateRequest(c *gin.Context) (string, bool) {
@@ -307,12 +337,23 @@ func authenticateRequest(c *gin.Context) (string, bool) {
 	token := strings.TrimPrefix(authHeader, "Bearer ")
 	hash := md5.Sum([]byte(token))
 	tokenMD5 := hex.EncodeToString(hash[:])
+	cacheKey := "apikey:" + tokenMD5
 
+	// 1. 先查 Redis 缓存
+	ctx := context.Background()
+	if userID, err := redisClient.Get(ctx, cacheKey).Result(); err == nil {
+		return userID, true
+	}
+
+	// 2. 缓存未命中，查数据库
 	var userID string
 	err := db.QueryRow("SELECT user_id FROM api_keys WHERE id = $1", tokenMD5).Scan(&userID)
 	if err != nil {
 		return "", false
 	}
+
+	// 3. 写入缓存
+	redisClient.Set(ctx, cacheKey, userID, apiKeyCacheTTL)
 
 	return userID, true
 }
@@ -752,6 +793,12 @@ func main() {
 		log.Fatalf("无法连接数据库: %v", err)
 	}
 	defer db.Close()
+
+	// 初始化 Redis 连接
+	if err := initRedis(); err != nil {
+		log.Fatalf("无法连接 Redis: %v", err)
+	}
+	defer redisClient.Close()
 
 	// 启动时执行一次 leaderboard 统计
 	log.Println("[LEADERBOARD] Running initial statistics...")
