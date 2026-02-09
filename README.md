@@ -129,6 +129,10 @@ go build -o acemcp-relay .
 - **`error_details`**：错误详情，关联到 request_logs，区分代理层（proxy）和上游（upstream）错误
 - **`leaderboard`**：每日用户请求量排行榜
 
+## 已知限制
+
+- `/chat-stream` 端点的请求体校验目前不够完善，部分未符合预期的请求仍可能通过校验并转发到上游，导致消耗 credit。
+
 ## 日志
 
 服务日志同时输出到控制台和 `gin.log` 文件。
