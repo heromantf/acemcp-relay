@@ -38,6 +38,7 @@ var (
 	dbName          string
 	redisPort       int
 	apiKeyCacheTTL  time.Duration
+	sessionTTL      time.Duration
 )
 
 const (
@@ -99,6 +100,12 @@ var skipRequestHeaders = map[string]bool{
 	"X-Real-Ip":         true,
 	"X-Original-Uri":    true,
 	"Via":               true,
+	// 由 relay 控制的头，忽略客户端传入的值
+	"X-Request-Id":         true,
+	"X-Request-Session-Id": true,
+	"Sentry-Trace":         true,
+	"Baggage":              true,
+	"User-Agent":           true,
 }
 
 // 响应头过滤：hop-by-hop 头，代理不应转发
@@ -149,6 +156,47 @@ func generateRandomTenantName() string {
 	num1 := int(b[0]) % 21 // 0-20
 	num2 := int(b[1]) % 10 // 0-9
 	return fmt.Sprintf("d%d-discovery%d", num1, num2)
+}
+
+// 模拟 CLI/插件 的 User-Agent，每个 session 随机绑定一种
+var fakeUserAgents = []string{
+	"augment.cli/0.15.0 (commit 8c3839b5)/interactive",
+	"Augment.vscode-augment/0.754.3 (darwin; arm64; 25.2.0) vscode/1.109.2",
+}
+
+// sessionInfo 存储在 Redis 中的会话信息
+type sessionInfo struct {
+	SessionID string `json:"session_id"`
+	UA        string `json:"ua"`
+}
+
+// getOrCreateSession 获取或创建用户会话，返回 session_id 和 User-Agent
+// 会话在用户不活跃超过 sessionTTL 后自动过期，下次请求会创建新会话
+func getOrCreateSession(ctx context.Context, userID string) (sessionID, ua string) {
+	cacheKey := fmt.Sprintf("session:%s", userID)
+
+	// 尝试获取已有会话
+	val, err := redisClient.Get(ctx, cacheKey).Result()
+	if err == nil {
+		var info sessionInfo
+		if json.Unmarshal([]byte(val), &info) == nil {
+			// 刷新 TTL（活跃续期）
+			redisClient.Expire(ctx, cacheKey, sessionTTL)
+			return info.SessionID, info.UA
+		}
+	}
+
+	// 创建新会话
+	newSessionID := uuid.New().String()
+	b := make([]byte, 1)
+	rand.Read(b)
+	newUA := fakeUserAgents[int(b[0])%len(fakeUserAgents)]
+
+	info := sessionInfo{SessionID: newSessionID, UA: newUA}
+	data, _ := json.Marshal(info)
+	redisClient.Set(ctx, cacheKey, string(data), sessionTTL)
+
+	return newSessionID, newUA
 }
 
 // sanitizeGetModelsResponse 对 /get-models 响应进行隐私处理
@@ -210,6 +258,7 @@ func loadConfig() {
 	dbName = getEnv("DB_NAME", "postgres")
 	redisPort = getEnvInt("REDIS_PORT", 6379)
 	apiKeyCacheTTL = getEnvDuration("API_KEY_CACHE_TTL", 30*time.Minute)
+	sessionTTL = getEnvDuration("SESSION_TTL", 5*time.Minute)
 }
 
 func getEnv(key, defaultValue string) string {
@@ -516,6 +565,12 @@ func proxyHandler(c *gin.Context) {
 		}
 	}
 
+	// 注入模拟 CLI/插件 请求头
+	sessionID, ua := getOrCreateSession(c.Request.Context(), c.GetString(ContextKeyUserID))
+	req.Header.Set("X-Request-Id", uuid.New().String())
+	req.Header.Set("X-Request-Session-Id", sessionID)
+	req.Header.Set("User-Agent", ua)
+
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		if errors.Is(c.Request.Context().Err(), context.Canceled) {
@@ -601,6 +656,12 @@ func sseProxyHandler(c *gin.Context) {
 			req.Header.Add(key, v)
 		}
 	}
+
+	// 注入模拟 CLI/插件 请求头
+	sessionID, ua := getOrCreateSession(c.Request.Context(), c.GetString(ContextKeyUserID))
+	req.Header.Set("X-Request-Id", uuid.New().String())
+	req.Header.Set("X-Request-Session-Id", sessionID)
+	req.Header.Set("User-Agent", ua)
 
 	resp, err := sseHttpClient.Do(req)
 	if err != nil {
